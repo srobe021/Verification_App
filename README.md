@@ -1,4 +1,4 @@
-# sourcing-test-automation
+# TE-Verification-APP
 
 `Verification_App` is a program that can assist with automating manual test verification efforts.
 
