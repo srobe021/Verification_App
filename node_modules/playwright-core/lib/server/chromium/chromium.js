@@ -10,7 +10,6 @@ var _path = _interopRequireDefault(require("path"));
 var _crBrowser = require("./crBrowser");
 var _processLauncher = require("../../utils/processLauncher");
 var _crConnection = require("./crConnection");
-var _stackTrace = require("../../utils/stackTrace");
 var _browserType = require("../browserType");
 var _transport = require("../transport");
 var _crDevTools = require("./crDevTools");
@@ -20,7 +19,7 @@ var _userAgent = require("../../utils/userAgent");
 var _ascii = require("../../utils/ascii");
 var _utils = require("../../utils");
 var _fileUtils = require("../../utils/fileUtils");
-var _debugLogger = require("../../common/debugLogger");
+var _debugLogger = require("../../utils/debugLogger");
 var _progress = require("../progress");
 var _timeoutSettings = require("../../common/timeoutSettings");
 var _helper = require("../helper");
@@ -69,7 +68,7 @@ class Chromium extends _browserType.BrowserType {
       'User-Agent': (0, _userAgent.getUserAgent)()
     };else if (headersMap && !Object.keys(headersMap).some(key => key.toLowerCase() === 'user-agent')) headersMap['User-Agent'] = (0, _userAgent.getUserAgent)();
     const artifactsDir = await _fs.default.promises.mkdtemp(ARTIFACTS_FOLDER);
-    const wsEndpoint = await urlToWSEndpoint(progress, endpointURL);
+    const wsEndpoint = await urlToWSEndpoint(progress, endpointURL, headersMap);
     progress.throwIfAborted();
     const chromeTransport = await _transport.WebSocketTransport.connect(progress, wsEndpoint, headersMap);
     const cleanedUp = new _manualPromise.ManualPromise();
@@ -100,19 +99,12 @@ class Chromium extends _browserType.BrowserType {
       artifactsDir,
       downloadsPath: options.downloadsPath || artifactsDir,
       tracesDir: options.tracesDir || artifactsDir,
-      // On Windows context level proxies only work, if there isn't a global proxy
-      // set. This is currently a bug in the CR/Windows networking stack. By
-      // passing an arbitrary value we disable the check in PW land which warns
-      // users in normal (launch/launchServer) mode since otherwise connectOverCDP
-      // does not work at all with proxies on Windows.
-      proxy: {
-        server: 'per-context'
-      },
       originalLaunchOptions: {}
     };
     (0, _browserContext.validateBrowserContextOptions)(persistent, browserOptions);
     progress.throwIfAborted();
     const browser = await _crBrowser.CRBrowser.connect(this.attribution.playwright, chromeTransport, browserOptions);
+    browser._isCollocatedWithServer = false;
     browser.on(_browser.Browser.Events.Disconnected, doCleanup);
     return browser;
   }
@@ -121,7 +113,7 @@ class Chromium extends _browserType.BrowserType {
     const directory = _registry.registry.findExecutable('chromium').directory;
     return directory ? new _crDevTools.CRDevTools(_path.default.join(directory, 'devtools-preferences.json')) : undefined;
   }
-  async _connectToTransport(transport, options) {
+  async connectToTransport(transport, options) {
     let devtools = this._devtools;
     if (options.__testHookForDevTools) {
       devtools = this._createDevTools();
@@ -129,17 +121,19 @@ class Chromium extends _browserType.BrowserType {
     }
     return _crBrowser.CRBrowser.connect(this.attribution.playwright, transport, options, devtools);
   }
-  _rewriteStartupError(error) {
-    if (error.message.includes('Missing X server')) return (0, _stackTrace.rewriteErrorMessage)(error, '\n' + (0, _ascii.wrapInASCIIBox)(_browserType.kNoXServerRunningError, 1));
+  doRewriteStartupLog(error) {
+    if (!error.logs) return error;
+    if (error.logs.includes('Missing X server')) error.logs = '\n' + (0, _ascii.wrapInASCIIBox)(_browserType.kNoXServerRunningError, 1);
     // These error messages are taken from Chromium source code as of July, 2020:
     // https://github.com/chromium/chromium/blob/70565f67e79f79e17663ad1337dc6e63ee207ce9/content/browser/zygote_host/zygote_host_impl_linux.cc
-    if (!error.message.includes('crbug.com/357670') && !error.message.includes('No usable sandbox!') && !error.message.includes('crbug.com/638180')) return error;
-    return (0, _stackTrace.rewriteErrorMessage)(error, [`Chromium sandboxing failed!`, `================================`, `To workaround sandboxing issues, do either of the following:`, `  - (preferred): Configure environment to support sandboxing: https://playwright.dev/docs/troubleshooting`, `  - (alternative): Launch Chromium without sandbox using 'chromiumSandbox: false' option`, `================================`, ``].join('\n'));
+    if (!error.logs.includes('crbug.com/357670') && !error.logs.includes('No usable sandbox!') && !error.logs.includes('crbug.com/638180')) return error;
+    error.logs = [`Chromium sandboxing failed!`, `================================`, `To avoid the sandboxing issue, do either of the following:`, `  - (preferred): Configure your environment to support sandboxing`, `  - (alternative): Launch Chromium without sandbox using 'chromiumSandbox: false' option`, `================================`, ``].join('\n');
+    return error;
   }
-  _amendEnvironment(env, userDataDir, executable, browserArguments) {
+  amendEnvironment(env, userDataDir, executable, browserArguments) {
     return env;
   }
-  _attemptToGracefullyCloseBrowser(transport) {
+  attemptToGracefullyCloseBrowser(transport) {
     const message = {
       method: 'Browser.close',
       id: _crConnection.kBrowserCloseMessageId,
@@ -253,7 +247,7 @@ class Chromium extends _browserType.BrowserType {
       throw e;
     }
   }
-  _defaultArgs(options, isPersistent, userDataDir) {
+  defaultArgs(options, isPersistent, userDataDir) {
     const chromeArguments = this._innerDefaultArgs(options);
     chromeArguments.push(`--user-data-dir=${userDataDir}`);
     if (options.useWebSocket) chromeArguments.push('--remote-debugging-port=0');else chromeArguments.push('--remote-debugging-pipe');
@@ -262,8 +256,7 @@ class Chromium extends _browserType.BrowserType {
   }
   _innerDefaultArgs(options) {
     const {
-      args = [],
-      proxy
+      args = []
     } = options;
     const userDataDirArg = args.find(arg => arg.startsWith('--user-data-dir'));
     if (userDataDirArg) throw this._createUserDataDirArgMisuseError('--user-data-dir');
@@ -274,14 +267,15 @@ class Chromium extends _browserType.BrowserType {
       // See https://github.com/microsoft/playwright/issues/7362
       chromeArguments.push('--enable-use-zoom-for-dsf=false');
       // See https://bugs.chromium.org/p/chromium/issues/detail?id=1407025.
-      if (options.headless) chromeArguments.push('--use-angle');
+      if (options.headless && (!options.channel || options.channel === 'chromium-headless-shell')) chromeArguments.push('--use-angle');
     }
     if (options.devtools) chromeArguments.push('--auto-open-devtools-for-tabs');
     if (options.headless) {
-      if (process.env.PLAYWRIGHT_CHROMIUM_USE_HEADLESS_NEW) chromeArguments.push('--headless=new');else chromeArguments.push('--headless');
+      chromeArguments.push('--headless');
       chromeArguments.push('--hide-scrollbars', '--mute-audio', '--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4');
     }
     if (options.chromiumSandbox !== true) chromeArguments.push('--no-sandbox');
+    const proxy = options.proxyOverride || options.proxy;
     if (proxy) {
       const proxyURL = new URL(proxy.server);
       const isSocks = proxyURL.protocol === 'socks5:';
@@ -301,14 +295,30 @@ class Chromium extends _browserType.BrowserType {
     chromeArguments.push(...args);
     return chromeArguments;
   }
+  readyState(options) {
+    var _options$args;
+    if (options.useWebSocket || (_options$args = options.args) !== null && _options$args !== void 0 && _options$args.some(a => a.startsWith('--remote-debugging-port'))) return new ChromiumReadyState();
+    return undefined;
+  }
+  getExecutableName(options) {
+    if (options.channel) return options.channel;
+    return options.headless ? 'chromium-headless-shell' : 'chromium';
+  }
 }
 exports.Chromium = Chromium;
-async function urlToWSEndpoint(progress, endpointURL) {
+class ChromiumReadyState extends _browserType.BrowserReadyState {
+  onBrowserOutput(message) {
+    const match = message.match(/DevTools listening on (.*)/);
+    if (match) this._wsEndpoint.resolve(match[1]);
+  }
+}
+async function urlToWSEndpoint(progress, endpointURL, headers) {
   if (endpointURL.startsWith('ws')) return endpointURL;
   progress.log(`<ws preparing> retrieving websocket url from ${endpointURL}`);
   const httpURL = endpointURL.endsWith('/') ? `${endpointURL}json/version/` : `${endpointURL}/json/version/`;
   const json = await (0, _network.fetchData)({
-    url: httpURL
+    url: httpURL,
+    headers
   }, async (_, resp) => new Error(`Unexpected status ${resp.statusCode} when connecting to ${httpURL}.\n` + `This does not look like a DevTools server, try connecting via ws://.`));
   return JSON.parse(json).webSocketDebuggerUrl;
 }

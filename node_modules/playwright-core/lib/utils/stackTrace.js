@@ -7,12 +7,14 @@ exports.addInternalStackPrefix = void 0;
 exports.captureLibraryStackText = captureLibraryStackText;
 exports.captureLibraryStackTrace = captureLibraryStackTrace;
 exports.captureRawStack = captureRawStack;
+exports.compressCallLog = compressCallLog;
+exports.formatCallLog = formatCallLog;
 exports.rewriteErrorMessage = rewriteErrorMessage;
 exports.splitErrorMessage = splitErrorMessage;
 exports.stringifyStackFrames = stringifyStackFrames;
 var _path = _interopRequireDefault(require("path"));
 var _utilsBundle = require("../utilsBundle");
-var _ = require("./");
+var _sequence = require("./sequence");
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 /**
  * Copyright (c) Microsoft Corporation.
@@ -39,7 +41,6 @@ function rewriteErrorMessage(e, newMessage) {
   return e;
 }
 const CORE_DIR = _path.default.resolve(__dirname, '..', '..');
-const COVERAGE_PATH = _path.default.join(CORE_DIR, '..', '..', 'tests', 'config', 'coverage.js');
 const internalStackPrefixes = [CORE_DIR];
 const addInternalStackPrefix = prefix => internalStackPrefixes.push(prefix);
 exports.addInternalStackPrefix = addInternalStackPrefix;
@@ -51,13 +52,11 @@ function captureRawStack() {
   Error.stackTraceLimit = stackTraceLimit;
   return stack.split('\n');
 }
-function captureLibraryStackTrace(rawStack) {
-  const stack = rawStack || captureRawStack();
-  const isTesting = (0, _.isUnderTest)();
+function captureLibraryStackTrace() {
+  const stack = captureRawStack();
   let parsedFrames = stack.map(line => {
     const frame = (0, _utilsBundle.parseStackTraceLine)(line);
     if (!frame || !frame.file) return null;
-    if (!process.env.PWDEBUGIMPL && isTesting && frame.file.includes(COVERAGE_PATH)) return null;
     const isPlaywrightLibrary = frame.file.startsWith(CORE_DIR);
     const parsed = {
       frame,
@@ -112,4 +111,24 @@ function splitErrorMessage(message) {
     name: separationIdx !== -1 ? message.slice(0, separationIdx) : '',
     message: separationIdx !== -1 && separationIdx + 2 <= message.length ? message.substring(separationIdx + 2) : message
   };
+}
+function formatCallLog(log) {
+  if (!log || !log.some(l => !!l)) return '';
+  return `
+Call log:
+${_utilsBundle.colors.dim(log.join('\n'))}
+`;
+}
+function compressCallLog(log) {
+  const lines = [];
+  for (const block of (0, _sequence.findRepeatedSubsequences)(log)) {
+    for (let i = 0; i < block.sequence.length; i++) {
+      const line = block.sequence[i];
+      const leadingWhitespace = line.match(/^\s*/);
+      const whitespacePrefix = '  ' + (leadingWhitespace === null || leadingWhitespace === void 0 ? void 0 : leadingWhitespace[0]) || '';
+      const countPrefix = `${block.count} × `;
+      if (block.count > 1 && i === 0) lines.push(whitespacePrefix + countPrefix + line.trim());else if (block.count > 1) lines.push(whitespacePrefix + ' '.repeat(countPrefix.length - 2) + '- ' + line.trim());else lines.push(whitespacePrefix + '- ' + line.trim());
+    }
+  }
+  return lines;
 }
