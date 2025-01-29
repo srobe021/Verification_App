@@ -15,7 +15,7 @@ async def run(playwright):
     email = users['ai_login']['email']
     password = users['ai_login']['password']
 
-    browser = await playwright.firefox.launch(headless=False)    # Setting headless = False
+    browser = await playwright.firefox.launch(headless=False) 
     context = await browser.new_context()
     page = await context.new_page()
     await page.goto('https://www.bing.com/search?q=Bing+AI&showconv=1')

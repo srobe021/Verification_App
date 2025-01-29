@@ -396,7 +396,7 @@ class FileCompressor(QWidget):
         self.ticket_AC_display.clear()
         self.ticket_AI_display.clear()
 
-        import sample  # import the sample module
+        import sample 
         MTCs = sample.execute()   # call the execute() function of sample.py     
         self.ticket_AI_display.setText(MTCs)  # show MTCs in its place
 
