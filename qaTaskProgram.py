@@ -128,7 +128,6 @@ class FileCompressor(QWidget):
     
     def stop_ai(self):
         # Blocks the signals from QFileSystemWatcher, stopping the AI from monitoring
-        # You may need to adjust this part to specifically target the AI portion of your program
         self.fileWatcher.blockSignals(True)
 
         # Stops the progress bar
